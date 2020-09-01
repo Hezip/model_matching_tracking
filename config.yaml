@@ -1,0 +1,7 @@
+voxel_size_model: 0.1
+
+voxel_size_scene: 0.1 #voxel_filter大小
+
+ransac_times: 30000  #匹配次数
+
+match_threshold: 0.75  #匹配度(inliers)超过0.8认为是一次有效的匹配 track demo中设置为0.3
