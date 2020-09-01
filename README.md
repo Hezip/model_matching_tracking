@@ -1,11 +1,10 @@
-# v_hezhenpeng-truck_pose_estimation
-Match the object(truck) in the scene through by given template, and output **T: object --- > template**
+# pose_estimation
 
+Match the object(truck) in the scene through by given template, and output **T: object --- > template**
 
 ## Getting Started
 
 ### Prerequisites
-
 
 ```
 PCL >= 1.7
