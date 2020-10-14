@@ -13,6 +13,11 @@
 #include <pcl/features/fpfh_omp.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
+#include <Eigen/Core>
+
+#include <teaser/ply_io.h>
+#include <teaser/matcher.h>
+#include <teaser/registration.h>
 
 namespace pose_estimation {
 class ModelMatch {
@@ -24,8 +29,7 @@ class ModelMatch {
 
   bool Initialization(const std::string &yaml_path, const pcl::PointCloud<pcl::PointXYZ>::Ptr model);
 
-  bool MatchModel(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
-                  Eigen::Matrix4f &transform);
+  bool MatchModel(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene, Eigen::Matrix4f &transform);
 
   bool RemoveGround(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_left);
@@ -45,6 +49,13 @@ class ModelMatch {
   bool RansacPoseEstimation(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
                             Eigen::Matrix4f &transform);
 
+  bool TeaserPoseEstimation(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
+                            Eigen::Matrix4f &transform);
+
+  double IcpFitnessScore(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
+                            const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& source,
+                            const Eigen::Matrix4f& relpose, double max_range);
+
   bool IcpFineTuning(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
                      const Eigen::Matrix4f &initial_guess,
                      Eigen::Matrix4f &transform);
@@ -56,6 +67,9 @@ class ModelMatch {
   float voxel_size_model_;
   int ransac_times_;
   float match_threshold_;
+  bool enable_icp_;
+  bool has_initial_guess_;
+  std::string method_;
   pcl::PointCloud<pcl::PointNormal>::Ptr normal_model_;
   pcl::PointCloud<pcl::FPFHSignature33>::Ptr feature_model_;
 };

@@ -1,0 +1,19 @@
+voxel_size_model: 0.1
+
+voxel_size_scene: 0.1 # voxel_filter大小, 影响后续特征提取和匹配
+
+has_initial_guess: false # 如果有initial_guess, 则不需要进行ransac或teaser
+#初始矩阵地址 config/initial_guess.txt
+
+enable_icp: true # 使用icp做微调
+
+method: "ransac"  # ransac or teaser
+
+ransac:
+  ransac_times: 30000 # ransac匹配最大次数, 影响运行时间
+
+  match_threshold: 0.70  # inliers超过threshold认为是一次有效的匹配
+
+
+#teaser:
+#  teaser_times: 300 # unused

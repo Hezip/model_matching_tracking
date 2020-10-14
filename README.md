@@ -1,14 +1,16 @@
-# pose_estimation
-
+# v_hezhenpeng-truck_pose_estimation
 Match the object(truck) in the scene through by given template, and output **T: object --- > template**
+
 
 ## Getting Started
 
 ### Prerequisites
 
+make install
 ```
 PCL >= 1.7
 yaml-cpp (https://github.com/jbeder/yaml-cpp)
+teaser++ (https://github.com/MIT-SPARK/TEASER-plusplus)
 ```
 
 ### Building
@@ -21,12 +23,17 @@ mkdir build && cd build && cmake .. && make -j4
 ## Running the tests
 
 
-Download the sample [data](https://ecloud.baidu.com?t=377036bef52c1a8d855f6bc5129c832f)
+Download the sample [data](https://ecloud.baidu.com?t=9fe0c59838eb6a938522bb0bd65e6016)
+
+
+**Config.yaml** 
+
+first read the config.yaml in *config/* !!! 
 
 
 **For Match** you should run
 ```
-./match truck_back_model.pcd truck_back_scene.pcd
+./match model_left.pcd scene_left.pcd
 ```
 ```
 Enter **SPACE** to show/hide the model

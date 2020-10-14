@@ -5,6 +5,7 @@
  * @Date: 2020-06-08
  */
 #include "model_match/model_match.h"
+#include "model_match/common.hpp"
 
 #include <pcl/common/time.h>
 #include <pcl/io/pcd_io.h>
@@ -18,6 +19,7 @@
 #include <Eigen/Core>
 
 #include <string>
+#include <chrono>
 
 using namespace pcl;
 
@@ -34,9 +36,11 @@ bool ModelMatch::LoadParams(const std::string &yaml_path) {
   YAML::Node config = YAML::LoadFile(yaml_path);
   voxel_size_model_ = config["voxel_size_model"].as<float>();
   voxel_size_scene_ = config["voxel_size_scene"].as<float>();
-  ransac_times_ = config["ransac_times"].as<float>();
-  match_threshold_ = config["match_threshold"].as<float>();
-
+  ransac_times_ = config["ransac"]["ransac_times"].as<float>();
+  match_threshold_ = config["ransac"]["match_threshold"].as<float>();
+  enable_icp_ = config["enable_icp"].as<bool>();
+  has_initial_guess_ = config["has_initial_guess"].as<bool>();
+  method_ = config["method"].as<std::string>();
   show_align_ = 0;
   return true;
 }
@@ -53,20 +57,6 @@ bool ModelMatch::LoadModel(const PointCloud<PointXYZ>::Ptr model) {
 bool ModelMatch::Initialization(const std::string &yaml_path, const pcl::PointCloud<pcl::PointXYZ>::Ptr model) {
   LoadParams(yaml_path);
   LoadModel(model);
-  return true;
-}
-
-bool ModelMatch::MatchModel(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
-                            Eigen::Matrix4f &transform) {
-  Eigen::Matrix4f rough_tf = Eigen::Matrix4f::Identity();
-  Eigen::Matrix4f precise_tf = Eigen::Matrix4f::Identity();
-  if (!RansacPoseEstimation(scene, rough_tf)) {
-    return false;
-  }
-  if (!IcpFineTuning(scene, rough_tf, precise_tf)) {
-    return false;
-  }
-  transform = precise_tf;
   return true;
 }
 
@@ -141,7 +131,7 @@ bool ModelMatch::FeatureExtraction(const float voxel_size,
   grid.setInputCloud(cloud);
   grid.filter(*cloud);
 
-  console::print_highlight("Estimating scene normals...\n");
+  console::print_highlight("Estimating normals...\n");
   NormalEstimationOMP<PointNormal,PointNormal> nest;
   nest.setRadiusSearch(voxel_size*3);
   nest.setInputCloud(cloud);
@@ -165,7 +155,7 @@ bool ModelMatch::RansacPoseEstimation(const PointCloud<PointXYZ>::Ptr &scene,
   FeatureCloudT::Ptr feature_scene (new FeatureCloudT);
   FeatureExtraction(voxel_size_scene_, normal_scene, feature_scene);
 
-  console::print_highlight("Starting alignment...\n");
+  console::print_highlight("Starting alignment RANSAC...\n");
   PointCloud<PointNormal>::Ptr object_aligned(new PointCloud<PointNormal>);
   SampleConsensusPrerejective<PointNormal,PointNormal,FeatureT> align;
   align.setInputSource(normal_model_);
@@ -193,29 +183,124 @@ bool ModelMatch::RansacPoseEstimation(const PointCloud<PointXYZ>::Ptr &scene,
   }
 }
 
+bool ModelMatch::TeaserPoseEstimation(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene,
+                          Eigen::Matrix4f &transform) {
+  PointCloud<PointNormal>::Ptr normal_scene(new PointCloud<PointNormal>);
+  copyPointCloud(*scene, *normal_scene);
+
+  FeatureCloudT::Ptr feature_scene (new FeatureCloudT);
+  FeatureExtraction(voxel_size_scene_, normal_scene, feature_scene);
+
+  // Convert to teaser point cloud
+  teaser::PointCloud tgt_cloud;
+  for (size_t i = 0; i < normal_scene->size(); ++i) {
+    tgt_cloud.push_back({normal_scene->points[i].x, normal_scene->points[i].y, normal_scene->points[i].z});
+  }
+  teaser::PointCloud src_cloud;
+  for (size_t i = 0; i < normal_model_->size(); ++i) {
+    src_cloud.push_back({normal_model_->points[i].x, normal_model_->points[i].y, normal_model_->points[i].z});
+  }
+
+  teaser::Matcher matcher;
+  auto correspondences = matcher.calculateCorrespondences(
+      src_cloud, tgt_cloud, *feature_model_, *feature_scene, false, true, false, 0.95);
+
+  console::print_highlight("Starting alignment Teaser++...\n");
+  // Run TEASER++ registration
+  // Prepare solver parameters
+  teaser::RobustRegistrationSolver::Params params;
+  params.noise_bound = 0.01;
+  params.cbar2 = 1;
+  params.estimate_scaling = false;
+  params.rotation_max_iterations = 500;
+  params.rotation_gnc_factor = 1.4;
+  params.rotation_estimation_algorithm =
+      teaser::RobustRegistrationSolver::ROTATION_ESTIMATION_ALGORITHM::GNC_TLS;
+  params.rotation_cost_threshold = 1e-6;
+
+  // Solve with TEASER++
+  teaser::RobustRegistrationSolver solver(params);
+  std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+  solver.solve(src_cloud, tgt_cloud, correspondences);
+  std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+
+  auto solution = solver.getSolution();
+  transform.block<3,3>(0,0) = solution.rotation.cast<float>();
+  transform.block<3,1>(0,3) = solution.translation.cast<float>();
+  transform(3,3) = 1.0;
+  return true;
+}
+
 bool ModelMatch::IcpFineTuning(const PointCloud<PointXYZ>::Ptr &scene,
                                const Eigen::Matrix4f &initial_guess,
                                Eigen::Matrix4f &transform) {
+  console::print_highlight("Starting ICP...\n");
   PointCloud<PointXYZ>::Ptr model_tf(new PointCloud<PointXYZ>);
   copyPointCloud(*normal_model_, *model_tf);
   transformPointCloud(*model_tf, *model_tf, initial_guess);
 
   PointCloud<PointXYZ>::Ptr registered (new PointCloud<PointXYZ>);
   IterativeClosestPoint<PointXYZ, PointXYZ> icp;
-  icp.setMaximumIterations(30);
-  icp.setMaxCorrespondenceDistance(1.0);
+  icp.setMaximumIterations(100);
+  icp.setMaxCorrespondenceDistance(0.8);
   icp.setInputTarget(scene);
   icp.setInputSource(model_tf);
   icp.align(*registered);
   if (icp.hasConverged()) {
     Eigen::Matrix4f icp_transformation = icp.getFinalTransformation();
     transform = icp_transformation * initial_guess;
+
+    console::print_highlight("Icp alignment fitness score: %.2f / 1.0\n", IcpFitnessScore(scene, model_tf, icp_transformation, 0.2));
     return true;
   } else {
-    pcl::console::print_error("Icp Alignment failed!\n");
+    pcl::console::print_error("Icp alignment failed!\n");
     return false;
   }
 }
+
+double ModelMatch::IcpFitnessScore(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
+                                      const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& source,
+                                      const Eigen::Matrix4f& relpose, double max_range) {
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree_(new pcl::search::KdTree<pcl::PointXYZ>());
+  tree_->setInputCloud(target);
+
+  double fitness_score = 0.0;
+  // Transform the input dataset using the final transformation
+  pcl::PointCloud<pcl::PointXYZ> input_transformed;
+  pcl::transformPointCloud (*source, input_transformed, relpose.cast<float>());
+
+  std::vector<int> nn_indices (1);
+  std::vector<float> nn_dists (1);
+
+  // For each point in the source dataset
+  int nr = 0;
+  for (size_t i = 0; i < input_transformed.points.size (); ++i) {
+    // Find its nearest neighbor in the target
+    tree_->nearestKSearch (input_transformed.points[i], 1, nn_indices, nn_dists);
+    // Deal with occlusions (incomplete targets)
+    if (nn_dists[0] <= max_range) {
+      // Add to the fitness score
+      fitness_score += nn_dists[0];
+      nr++;
+    }
+  }
+
+  if (nr > 0)
+//    return (fitness_score / nr);
+    return (nr*1.0/source->size());
+  else
+    return (std::numeric_limits<double>::max ());
+}
+
+double weight(double a, double max_x, double min_y, double max_y, double x)  {
+  a = 20.0;
+  max_x = 0.5;
+  min_y = 0.1 * 0.1;
+  max_y = 5 * 5;
+  double y = (1.0 - std::exp(-a * x)) / (1.0 - std::exp(-a * max_x));
+  return min_y + (max_y - min_y) * y;
+}
+
 
 void ModelMatch::keyboardEventOccurred (const pcl::visualization::KeyboardEvent& event, void* nothing) {
   if (event.getKeySym () == "space" && event.keyDown ()) {
@@ -225,6 +310,42 @@ void ModelMatch::keyboardEventOccurred (const pcl::visualization::KeyboardEvent&
       show_align_ ++;
     }
   }
+}
+
+bool ModelMatch::MatchModel(const pcl::PointCloud<pcl::PointXYZ>::Ptr &scene, Eigen::Matrix4f &transform) {
+  Eigen::Matrix4f rough_tf = Eigen::Matrix4f::Identity();
+  Eigen::Matrix4f precise_tf = Eigen::Matrix4f::Identity();
+
+  if(has_initial_guess_) {
+    //if we have initial guess;
+    Eigen::Matrix4d initial_guess;
+    std::string file_path = "../config/initial_guess.txt";
+    loadMatrix(file_path, initial_guess);
+    rough_tf = initial_guess.cast<float>();
+  } else {
+    //we use ransac of teaser to measure initial guess
+    if(method_ == "ransac") {
+      if (!RansacPoseEstimation(scene, rough_tf)) {
+        return false;
+      }
+    } else {
+      if (!TeaserPoseEstimation(scene, rough_tf)) {
+        return false;
+      }
+    }
+  }
+
+  if (enable_icp_) {
+    //we want to use icp to fine tune our transfrom
+    if (!IcpFineTuning(scene, rough_tf, precise_tf)) {
+      return false;
+    }
+  } else {
+    precise_tf = rough_tf;
+  }
+
+  transform = precise_tf;
+  return true;
 }
 
 }  // namespace pose_estimation
